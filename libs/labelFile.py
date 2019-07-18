@@ -12,6 +12,10 @@ from libs.yolo_io import YOLOWriter
 from libs.pascal_voc_io import XML_EXT
 import os.path
 import sys
+from urllib.parse import urlparse, ParseResult
+import io
+
+from google.cloud import storage
 
 
 class LabelFileError(Exception):
@@ -65,7 +69,17 @@ class LabelFile(object):
         # Read from file path because self.imageData might be empty if saving to
         # Pascal format
         image = QImage()
-        image.load(imagePath)
+        if imagePath.startswith("gs://"):
+            storage_client = storage.Client()
+            url = urlparse(imagePath)
+            bucket = storage_client.get_bucket(url.hostname)
+            target_file = io.BytesIO()
+            bucket.get_blob(url.path[1:]).download_to_file(target_file)
+            target_file.seek(0,0)
+            data =  target_file.read()
+            image.loadFromData(data)
+        else:
+            image.load(imagePath)
         imageShape = [image.height(), image.width(),
                       1 if image.isGrayscale() else 3]
         writer = YOLOWriter(imgFolderName, imgFileName,
