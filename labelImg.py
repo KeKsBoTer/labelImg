@@ -7,10 +7,12 @@ import platform
 import re
 import subprocess
 import sys
+import os
 from collections import defaultdict
 from functools import partial
 from urllib.parse import urlparse, ParseResult
 import io
+import re
 
 from google.cloud import storage
 from libs.canvas import Canvas
@@ -235,6 +237,9 @@ class MainWindow(QMainWindow, WindowMixin):
         saveAs = action(getStr('saveAs'), self.saveFileAs,
                         'Ctrl+Shift+S', 'save-as', getStr('saveAsDetail'), enabled=False)
 
+        export = action(getStr('export'), self.export,
+                        'Ctrl+Shift+E', 'export', getStr('exportDetail'), enabled=False)
+
         close = action(getStr('closeCur'), self.closeFile,
                        'Ctrl+W', 'close', getStr('closeCurDetail'))
 
@@ -338,7 +343,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.drawSquaresOption.triggered.connect(self.toogleDrawSquare)
 
         # Store actions for further handling.
-        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs, open=open, close=close, resetAll=resetAll,
+        self.actions = struct(save=save, save_format=save_format, saveAs=saveAs,export=export, open=open, close=close, resetAll=resetAll,
                               lineColor=color1, create=create, delete=delete, edit=edit, copy=copy,
                               createMode=createMode, editMode=editMode, advancedMode=advancedMode,
                               shapeLineColor=shapeLineColor, shapeFillColor=shapeFillColor,
@@ -385,7 +390,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
 
         addActions(self.menus.file,
-                   (open, opendir, openBucket, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs, close, resetAll, quit))
+                   (open, opendir, openBucket, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs,export, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
         addActions(self.menus.view, (
             self.autoSaving,
@@ -1191,6 +1196,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if dirpath is not None and len(dirpath) > 1:
             self.defaultSaveDir = dirpath
+            self.actions.export.setEnabled(True)
+
 
         self.statusBar().showMessage('%s . Annotation will be saved to %s' %
                                      ('Change saved folder', self.defaultSaveDir))
@@ -1369,6 +1376,10 @@ class MainWindow(QMainWindow, WindowMixin):
         assert not self.image.isNull(), "cannot save empty image"
         self._saveFile(self.saveFileDialog())
 
+    def export(self, _value=False):
+        assert not self.defaultSaveDir == None, "cannot save empty labels"
+        self._exportFile(self.saveFileDialog())
+
     def saveFileDialog(self, removeExt=True):
         caption = '%s - Choose File' % __appname__
         filters = 'File (*%s)' % LabelFile.suffix
@@ -1376,7 +1387,7 @@ class MainWindow(QMainWindow, WindowMixin):
         dlg = QFileDialog(self, caption, openDialogPath, filters)
         dlg.setDefaultSuffix(LabelFile.suffix[1:])
         dlg.setAcceptMode(QFileDialog.AcceptSave)
-        filenameWithoutExtension = os.path.splitext(self.filePath)[0]
+        filenameWithoutExtension = os.path.splitext(self.filePath)[0] if self.filePath is not None else ""
         dlg.selectFile(filenameWithoutExtension)
         dlg.setOption(QFileDialog.DontUseNativeDialog, False)
         if dlg.exec_():
@@ -1393,6 +1404,33 @@ class MainWindow(QMainWindow, WindowMixin):
             self.setClean()
             self.statusBar().showMessage('Saved to  %s' % annotationFilePath)
             self.statusBar().show()
+
+    def _exportFile(self, out_path):
+        if out_path:
+            with open(out_path+".txt","w") as out_file:
+                files = [f for f in os.listdir(self.defaultSaveDir) if f.endswith('.txt') and f != "classes.txt"]
+                for file in files:
+                    with open(os.path.join(self.defaultSaveDir,file),"r") as label_file:
+                        try:
+                            lines = label_file.readlines()
+                            labels = []
+                            for label in [line.split(" ") for line in lines]:
+                                class_id = int(label[0])
+                                xcenter = float(label[1])
+                                ycenter = float(label[2])
+                                w = float(label[3])
+                                h = float(label[4])
+                                xmin = xcenter-w/2
+                                ymin = ycenter-h/2
+                                xmax = xcenter+w/2
+                                ymax = ycenter+h/2
+                                labels.append("{:d},{:.6f},{:.6f},{:.6f},{:.6f}".format(class_id,xmin,ymin,xmax,ymax))
+                            out_file.write("{0}.jpg {1}\n".format(file[:-4]," ".join(labels)))
+                        except:
+                            print("cannot export file '{}'".format(file))
+
+
+
 
     def closeFile(self, _value=False):
         if not self.mayContinue():
