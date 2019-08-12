@@ -13,8 +13,11 @@ from functools import partial
 from urllib.parse import urlparse, ParseResult
 import io
 import re
+import numpy as np
+import cv2
+import qimage2ndarray
 
-from google.cloud import storage
+#from google.cloud import storage
 from libs.canvas import Canvas
 from libs.colorDialog import ColorDialog
 from libs.constants import *
@@ -31,6 +34,7 @@ from libs.ustr import ustr
 from libs.utils import *
 from libs.yolo_io import TXT_EXT, YoloReader
 from libs.zoomWidget import ZoomWidget
+
 
 try:
     from PyQt5.QtGui import *
@@ -97,6 +101,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.dirname = None
         self.labelHist = []
         self.lastOpenDir = None
+
+        self.gamma = 1.0
 
         # Whether we need to save or not.
         self.dirty = False
@@ -210,8 +216,8 @@ class MainWindow(QMainWindow, WindowMixin):
         opendir = action(getStr('openDir'), self.openDirDialog,
                          'Ctrl+u', 'open', getStr('openDir'))
 
-        openBucket = action(getStr('openBucket'), self.openBucketDialog,
-                            'Ctrl+Shift+u', 'gcp', getStr('openBucketDetail'))
+        #openBucket = action(getStr('openBucket'), self.openBucketDialog,
+        #                    'Ctrl+Shift+u', 'gcp', getStr('openBucketDetail'))
 
         changeSavedir = action(getStr('changeSaveDir'), self.changeSavedirDialog,
                                'Ctrl+r', 'open', getStr('changeSavedAnnotationDir'))
@@ -311,6 +317,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self.MANUAL_ZOOM: lambda: 1,
         }
 
+        invert = action(getStr('invertColor'), self.invert_color,
+                        'Ctrl+Shift+I', 'invert', getStr('invertColorDetail'), enabled=False)
+
+        brighten = action(getStr('brighten'), partial(self.adjust_gamma, 1),
+                        'Ctrl+Shift++', 'brighten', getStr('brightenDetail'), enabled=False)
+
+        darken = action(getStr('darken'), partial(self.adjust_gamma, -1),
+                        'Ctrl+Shift+-', 'darken', getStr('darkenDetail'), enabled=False)
+
         edit = action(getStr('editLabel'), self.editLabel,
                       'Ctrl+E', 'edit', getStr('editLabelDetail'),
                       enabled=False)
@@ -350,8 +365,12 @@ class MainWindow(QMainWindow, WindowMixin):
                               zoom=zoom, zoomIn=zoomIn, zoomOut=zoomOut, zoomOrg=zoomOrg,
                               fitWindow=fitWindow, fitWidth=fitWidth,
                               zoomActions=zoomActions,
+                              invert=invert,
+                              brighten=brighten,
+                              darken=darken,
+                              color=(invert,brighten,darken),
                               fileMenuActions=(
-                                  open, opendir, openBucket, save, saveAs, close, resetAll, quit),
+                                  open, opendir, save, saveAs, close, resetAll, quit),
                               beginner=(), advanced=(),
                               editMenu=(edit, copy, delete,
                                         None, color1, self.drawSquaresOption),
@@ -390,7 +409,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.displayLabelOption.triggered.connect(self.togglePaintLabelsOption)
 
         addActions(self.menus.file,
-                   (open, opendir, openBucket, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs,export, close, resetAll, quit))
+                   (open, opendir, changeSavedir, openAnnotation, self.menus.recentFiles, save, save_format, saveAs,export, close, resetAll, quit))
         addActions(self.menus.help, (help, showInfo))
         addActions(self.menus.view, (
             self.autoSaving,
@@ -399,7 +418,8 @@ class MainWindow(QMainWindow, WindowMixin):
             labels, advancedMode, None,
             hideAll, showAll, None,
             zoomIn, zoomOut, zoomOrg, None,
-            fitWindow, fitWidth))
+            fitWindow, fitWidth, None,
+            invert,brighten,darken))
 
         self.menus.file.aboutToShow.connect(self.updateFileMenu)
 
@@ -411,11 +431,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.tools = self.toolbar('Tools')
         self.actions.beginner = (
-            open, opendir, openBucket, changeSavedir, openNextImg, openPrevImg, verify, save, save_format, None, create, copy, delete, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, verify, save, save_format, None, create, copy, delete, None,
             zoomIn, zoom, zoomOut, fitWindow, fitWidth)
 
         self.actions.advanced = (
-            open, opendir, openBucket, changeSavedir, openNextImg, openPrevImg, save, save_format, None,
+            open, opendir, changeSavedir, openNextImg, openPrevImg, save, save_format, None,
             createMode, editMode, None,
             hideAll, showAll)
 
@@ -583,6 +603,9 @@ class MainWindow(QMainWindow, WindowMixin):
         for z in self.actions.zoomActions:
             z.setEnabled(value)
         for action in self.actions.onLoadActive:
+            action.setEnabled(value)
+
+        for action in self.actions.color:
             action.setEnabled(value)
 
     def queueEvent(self, function):
@@ -982,6 +1005,39 @@ class MainWindow(QMainWindow, WindowMixin):
         self.zoomMode = self.FIT_WIDTH if value else self.MANUAL_ZOOM
         self.adjustScale()
 
+    def invert_color(self,value=None):
+        self.image.invertPixels()
+        self.gamma = 1.0
+        shapes = self.canvas.shapes
+        self.canvas.loadPixmap(QPixmap.fromImage(self.image))
+        self.canvas.loadShapes(shapes)
+        self.paintCanvas()
+
+        
+    def _adjust_gamma(self,image, gamma=1.0):
+        # build a lookup table mapping the pixel values [0, 255] to
+        # their adjusted gamma values
+        invGamma = 1.0 / gamma
+        table = np.array([((i / 255.0) ** invGamma) * 255
+            for i in np.arange(0, 256)]).astype("uint8")
+
+        # apply gamma correction using the lookup table
+        return cv2.LUT(image, table)
+
+        
+    def adjust_gamma(self,value=0):
+        if value == 1:
+            self.gamma *= 2
+        elif value == -1:
+            self.gamma /= 2
+        np_image = qimage2ndarray.rgb_view(self.image)
+        np_image = self._adjust_gamma(np_image,gamma=self.gamma)
+        image = qimage2ndarray.array2qimage(np_image)
+        shapes = self.canvas.shapes
+        self.canvas.loadPixmap(QPixmap.fromImage(image))
+        self.canvas.loadShapes(shapes)
+        self.paintCanvas()
+        
     def togglePolygons(self, value):
         for item, shape in self.itemsToShapes.items():
             item.setCheckState(Qt.Checked if value else Qt.Unchecked)
@@ -1420,11 +1476,11 @@ class MainWindow(QMainWindow, WindowMixin):
                                 ycenter = float(label[2])
                                 w = float(label[3])
                                 h = float(label[4])
-                                xmin = xcenter-w/2
-                                ymin = ycenter-h/2
-                                xmax = xcenter+w/2
-                                ymax = ycenter+h/2
-                                labels.append("{:d},{:.6f},{:.6f},{:.6f},{:.6f}".format(class_id,xmin,ymin,xmax,ymax))
+                                xmin = int((xcenter-w/2)*1040)
+                                ymin = int((ycenter-h/2)*1040)
+                                xmax = int((xcenter+w/2)*1040)
+                                ymax = int((ycenter+h/2)*1040)
+                                labels.append("{:d},{:d},{:d},{:d},{:d}".format(xmin,ymin,xmax,ymax,class_id))
                             out_file.write("{0}.jpg {1}\n".format(file[:-4]," ".join(labels)))
                         except:
                             print("cannot export file '{}'".format(file))
